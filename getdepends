@@ -1,0 +1,524 @@
+#!/bin/bash
+
+# getdepends
+# Get a list of package dependencies from compiled binaries or source files
+# Copyright (C) 2017 keijukainen
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+license() {
+    echo -e "\ngetdepends Copyright (C) 2017 keijukainen
+This program comes with ABSOLUTELY NO WARRANTY.
+This is free software and you are welcome to
+redistribute it under the terms of the GPL.\n"
+}
+
+usage() {
+    echo -e "\nUsage: getdepends [OPTION]...
+Get dependencies for path specified by -i option.
+
+NOTE: It is recommended that you run pkgfile -u before using this script.
+
+  -i                input file or folder. if folder is specified
+                    then all files in folder will be scanned for
+                    dependencies.
+                    Example: -i \"/usr/bin/vlc\"
+                    Example: -i \"/path/to/folder\"
+  -l                print license info
+  -b                path to blacklist. a blacklist can be specified
+                    that contains a list of package names, one per
+                    line, that will be excluded from the output.
+                    Example: -b \"/path/to/blacklist\"
+  -f                format the output for PKGBUILD. adds single
+                    quotes and depends array to output.
+                    Output: depends=('zlib')
+  -R                recursively scan all subfolders
+  -p                show progress bars
+  -n                resolve included source files to packages. only
+                    necessary when input path is directory.
+                    Example: #include \"ss/ss.h\" -> e2fsprogs
+  -g                exclude packages from these groups.
+                    Example: -g \"group1|group2|group3\"
+  -r                exclude packages from these repos.
+                    Example: -r \"core|main\"\n"
+    exit $1;
+}
+
+isBinary() {
+    local me=$(file --mime-encoding -b "${1}")
+    if [ "${me}" = "binary" ]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+isText() {
+    local me=$(file --mime-encoding -b "${1}")
+    if [[ "${me}" =~ ascii$ ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+isSource() {
+    if [[ "${1}" =~ \.[hcpHCP]{1,3}$ ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+}
+
+getIncludes() {
+    local includes=($(grep -oP '^\s*#include\s+["<]?[\w\.\/\-]+' "${1}" | sed -r 's/\s*#include\s+[<"]//g'))
+    printf '%s\n' "${includes[@]}"
+}
+
+getLibs() {
+    local l=""
+    local temp=()
+    local libs=()
+
+    temp=($(ldd "${1}"))
+    for l in "${temp[@]}"; do
+        # strip all characters from ldd output up to "=> "
+        l="${l#*=> }"
+
+        # strip all characters from ldd output from " (" to end of string
+        l="${l% (*}"
+        
+        # remove whitespace
+        l="${l//[[:space:]]/}"
+
+        libs+=("${l}")
+    done
+    printf '%s\n' "${libs[@]}"
+}
+
+# $1 = recursive, $2 = path
+getSourceFiles() {
+    local sources=()
+
+    if [ "${1}" = false ]; then
+        # do not scan subfolders
+        sources=($(find "${2}" -maxdepth 1 -type f -regextype egrep -regex '.+\.[hcpHCP]{1,3}$'))
+    else
+        sources=($(find "${2}" -type f -regextype egrep -regex '.+\.[hcpHCP]{1,3}$'))
+    fi
+
+    printf '%s\n' "${sources[@]}"
+}
+
+# $1 = recursive, $2 = path
+getBinaryFiles() {
+    local f=""
+    local allfiles=()
+    local binaries=()
+
+    if [ "${1}" = false ]; then
+        # do not scan subfolders
+        allfiles=($(find "${2}" -maxdepth 1 -type f))
+    else
+        allfiles=($(find "${2}" -type f))
+    fi
+
+    for f in "${allfiles[@]}"; do
+        if [ $(isBinary "${f}") -eq 1 ]; then
+            binaries+=("${f}")
+        fi
+    done
+    printf '%s\n' "${binaries[@]}"
+}
+
+validateIncludes() {
+    local i=""
+    local abspath=""
+    local temp=()
+    local incfound=()
+    local incs=("${@}")
+
+    # sort and remove duplicates
+    local incsort=($(sort -u <<< "${incs[*]}"))
+
+    # search /usr/include for included files
+    for i in "${incsort[@]}"; do
+        # get absolute path.
+        # this will resolve issues like /usr/include//whatever.h
+        # or /usr/include/ss/../ss/ss.h
+        abspath=$(readlink -mn "/usr/include/${i}")
+        if [ -e "${abspath}" ]; then
+            # save full path for pkg search
+            incfound+=("${abspath}")
+            # skip includes that contain a slash
+        elif [[ ! "${i}" =~ [/] ]]; then
+            # this may return multiple matches
+            temp=($(find "/usr/include" -type f -name "${i}"))
+            if [ "${#temp[@]}" -gt 0 ]; then
+                # we only save the first match. it's not perfect but
+                # there's no way to determine which file was originally
+                # included in the source.
+                incfound+=(${temp[0]})
+            fi
+        fi
+    done
+    printf '%s\n' "${incfound[@]}"
+}
+
+validateLibs() {
+    local l=""
+    local abspath=""
+    local libfound=()
+    local libs=("${@}")
+
+    # sort and remove duplicates
+    local libsort=($(sort -u <<< "${libs[*]}"))
+    
+    # make sure libs exist
+    for l in "${libsort[@]}"; do
+        # get absolute path
+        # this will resolve issues like /usr/lib//whatever.so
+        # or /usr/lib/../lib/whatever.so
+        abspath=$(readlink -mn "${l}")
+        if [ -e "${abspath}" ]; then
+            # save full path for pkg search
+            libfound+=("${abspath}")
+        fi
+    done
+    printf '%s\n' "${libfound[@]}"
+}
+
+# $1 = current iteration, $2 = total
+getProgress() {
+    local prcnt=$(( "${1}" * 100 / "${2}" ))
+    local prgrs=$(( $prcnt / 2 ))
+    echo -ne "$prgrs\n$prcnt"
+}
+
+# ${@} = array
+formatArray() {
+    local TAB=$'\t'
+    local arr=("${@}")
+    for a in "${arr[@]}"; do
+        echo "$TAB'${a}'"
+    done
+}
+
+BL=false
+FMT=false
+EXG=false
+EXR=false
+REC=false
+INC=false
+PRG=false
+INPATH=""
+BLPATH=""
+BLGR=""
+BLRE=""
+
+while getopts ":i:b:fg:r:Rnpl" o; do
+    case "${o}" in
+        i)
+            INPATH="${OPTARG}"
+            ;;
+        b)
+            BL=true
+            BLPATH="${OPTARG}"
+            ;;
+        g)
+            EXG=true
+            BLGR="${OPTARG}"
+            ;;
+        r)
+            EXR=true
+            BLRE="${OPTARG}"
+            ;;
+        f)
+            FMT=true
+            ;;
+        R)
+            REC=true
+            ;;
+        n)
+            INC=true
+            ;;
+        p)
+            PRG=true
+            ;;
+        l)
+            license
+            exit
+            ;;
+        *)
+            usage 0
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+# the -i option is mandatory. exit if not specified.
+if [ -z "${INPATH}" ]; then
+    echo "You must specify an input path." >&2
+    usage 1
+fi
+
+# convert relative path to absolute path. readlink only
+# converts the path. it does not test if it exists.
+INPATH=$(readlink -mn "${INPATH}")
+if [ ! -e "${INPATH}" ]; then
+    echo "The specified input path does not exist." >&2
+    usage 1
+fi
+
+# make sure that inpath is binary, h/c/hpp/cpp or folder
+if [ ! -d "${INPATH}" ] && [ $(isBinary "${INPATH}") -ne 1 ] && [ $(isSource "${INPATH}") -ne 1 ]; then
+    echo "The specified input path is not supported." >&2
+    usage 1
+fi
+
+IFS=$'\n'
+PKG=""
+PMETER="["$(printf '=%.0s' {1..48})"]"
+
+BINARIES=()
+LIBLIST=()
+
+SOURCES=()
+INCLIST=()
+
+TARGETS=()
+PKGLIST=()
+PKGSVALID=()
+PKGSORT=()
+PKGSWL=()
+
+BLIST=()
+EXREPOS=()
+EXGROUPS=()
+ALLGROUPS=()
+
+BLPKG=false
+PKGSKIP=false
+
+if [ "${BL}" = true ]; then
+    BLPATH=$(readlink -mn "${BLPATH}")
+    if [ ! -e "${BLPATH}" ] || [ $(isText "${BLPATH}") -ne 1 ]; then
+        echo "The specified blacklist path does not exist or is not supported." >&2
+        # there's no need to exit here. just disable the
+        # blacklist and continue.
+        BL=false
+    else
+        BLIST=($(cat "${BLPATH}"))
+    fi
+fi
+
+if [ "${EXG}" = true ]; then
+    # get list of all package groups (formatted as "group package")
+    ALLGROUPS=($(pacman -Qg))
+
+    # split group blacklist by pipe
+    IFS=$'|'
+    read -r -a EXGROUPS <<< "${BLGR}"
+    IFS=$'\n'
+fi
+
+if [ "${EXR}" = true ]; then
+    # split repo blacklist by pipe
+    IFS=$'|'
+    read -r -a EXREPOS <<< "${BLRE}"
+    IFS=$'\n'
+fi
+
+if [ -f "${INPATH}" ]; then
+    # input is file
+    if [ $(isBinary "${INPATH}") -eq 1 ]; then
+        # input is binary file
+        # extract required lib paths
+        echo "Scanning for libraries..."
+        LIBLIST=($(getLibs "${INPATH}"))
+
+        # sort, remove duplicates, make sure libs exist
+        echo "Validating libraries..."
+        TARGETS+=($(validateLibs "${LIBLIST[@]}"))
+    else
+        # input is source file
+        # extract the included file names
+        echo "Scanning for includes..."
+        INCLIST=($(getIncludes "${INPATH}"))
+
+        # sort, remove duplicates, make sure included files exist
+        echo "Validating includes..."
+        TARGETS+=($(validateIncludes "${INCLIST[@]}"))
+    fi
+else
+    # input is directory
+    # make sure user wants to search for includes
+    if [ "${INC}" = true ]; then
+        # search inpath for all h/c/hpp/cpp files
+        echo "Searching for sources..."
+        SOURCES=($(getSourceFiles "${REC}" "${INPATH}"))
+
+        echo "Scanning for includes..."
+
+        iter=0
+        for s in "${SOURCES[@]}"; do
+            # extract the included file names
+            INCLIST+=($(getIncludes "${s}"))
+            
+            iter=$(($iter+1))
+            if [ "${PRG}" = true ]; then
+                prgrs=($(getProgress "${iter}" "${#SOURCES[@]}"))
+                printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+            fi
+        done
+
+        # sort, remove duplicates, make sure included files exist
+        echo -e "\nValidating includes..."
+        TARGETS+=($(validateIncludes "${INCLIST[@]}"))
+    fi
+    
+    # search for binary files
+    echo "Searching for binaries..."
+    BINARIES=($(getBinaryFiles "${REC}" "${INPATH}"))
+
+    echo -e "Scanning for libraries...\n"
+    
+    iter=0
+    for b in "${BINARIES[@]}"; do
+        # extract required lib paths for each binary
+        LIBLIST+=($(getLibs "${b}"))
+        
+        iter=$(($iter+1))
+        if [ "${PRG}" = true ]; then
+            prgrs=($(getProgress "${iter}" "${#BINARIES[@]}"))
+            printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+        fi
+    done
+
+    # sort, remove duplicates, make sure libs exist
+    echo -e "\nValidating libraries..."
+    TARGETS+=($(validateLibs "${LIBLIST[@]}"))
+fi
+
+echo "Scanning packages..."
+
+iter=0
+for t in "${TARGETS[@]}"; do
+    # get name of the package that contains file path. we can't
+    # use -q because we may need to exclude pkgs based on repo.
+    PKGLIST=($(pkgfile "${t}"))
+
+    # progress meter has to be updated before the first continue
+    iter=$(($iter+1))
+    if [ "${PRG}" = true ]; then
+        prgrs=($(getProgress "${iter}" "${#TARGETS[@]}"))
+        printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+    fi
+
+    # continue if no package found
+    if [ "${#PKGLIST[@]}" -lt 1 ]; then continue; fi
+
+    # the same file and path might be found in multiple packages.
+    # since there's no way of determining which package the app
+    # requires when there are duplicates of the same file we just
+    # take the first package listed.
+    PKG="${PKGLIST[0]}"
+    
+    # exclude repos option detected
+    if [ "${EXR}" = true ]; then
+        PKGSKIP=false
+        # loop through all repos to exclude
+        for r in "${EXREPOS[@]}"; do
+            if [ -z "${r}" ]; then continue; fi
+            
+            # if "repoName/" is found in packageName then
+            # exclude this package from results
+            if [[ "${PKG}" =~ ^"${r}"/ ]]; then
+                PKGSKIP=true
+                break
+            fi
+        done
+        if [ "${PKGSKIP}" = true ]; then continue; fi
+    fi
+
+    # strip all characters up to leading slash (e.g., remove "core/" from "core/readline")
+    PKG="${PKG#*/}"
+
+    # exclude groups option detected
+    if [ "${EXG}" = true ]; then
+        PKGSKIP=false
+        # loop through all groups to exclude
+        for g in "${EXGROUPS[@]}"; do
+            if [ -z "${g}" ]; then continue; fi
+            
+            # if "groupName packageName" is found in ALLGROUPS list then
+            # exclude this package from results
+            if [[ "${ALLGROUPS[@]}" =~ "${g} ${PKG}" ]]; then
+                PKGSKIP=true
+                break
+            fi
+        done
+        if [ "${PKGSKIP}" = true ]; then continue; fi
+    fi
+
+    # must be a valid package if we made it this far.
+    PKGSVALID+=("${PKG}")
+done
+
+# sort a-z and remove duplicates
+PKGSORT=($(sort -u <<< "${PKGSVALID[*]}"))
+
+# remove any packages found in blacklist
+if [ "${BL}" = true ]; then
+    for p in "${PKGSORT[@]}"; do
+        if [ -z "${p}" ]; then continue; fi
+        
+        BLPKG=false
+        for b in "${BLIST[@]}"; do
+            if [ -z "${b}" ]; then continue; fi
+            if [[ "${p}" =~ ^"${b}"$ ]]; then BLPKG=true; break; fi
+        done
+        if [ "${BLPKG}" = false ]; then PKGSWL+=("${p}"); fi
+    done
+fi
+
+# start output on a new line to avoid overwriting
+# a previous progress meter
+echo -e "\n"
+
+if [ "${FMT}" = true ]; then
+    # format option detected. declare depends array.
+    echo "depends=("
+fi
+
+if [ "${BL}" = true ]; then
+    if [ "${FMT}" = true ]; then
+        formatArray "${PKGSWL[@]}"
+    else
+        printf '%s\n' "${PKGSWL[@]}"
+    fi
+else
+    if [ "${FMT}" = true ]; then
+        formatArray "${PKGSORT[@]}"
+    else
+        printf '%s\n' "${PKGSORT[@]}"
+    fi
+fi
+
+if [ "${FMT}" = true ]; then
+    # format option detected. close depends array.
+    echo ")"
+fi
+
+unset IFS
