@@ -81,9 +81,26 @@ isSource() {
     fi
 }
 
+# $1 = path to source file (/path/to/whatever.h)
 getIncludes() {
+    local i=""
+    local temp=""
+    local extinc=()
+    # get the path of the folder containing source file
+    local sfolder=$(dirname "${1}")
+    # get array of all includes contained in source file
     local includes=($(grep -oP '^\s*#include\s+["<]?[\w\.\/\-]+' "${1}" | sed -r 's/\s*#include\s+[<"]//g'))
-    printf '%s\n' "${includes[@]}"
+    for i in "${includes[@]}"; do
+        # resolve relative path to include
+        temp=$(readlink -mn "${sfolder}/${i}")
+        # if included file exists in same folder as original
+        # source file then skip it in output
+        if [ -e "${temp}" ]; then continue; fi
+        # we can assume that the included file is located in
+        # /usr/include so we save it for output
+        extinc+=("${i}")
+    done
+    printf '%s\n' "${extinc[@]}"
 }
 
 getLibs() {
@@ -135,7 +152,8 @@ getBinaryFiles() {
     fi
 
     for f in "${allfiles[@]}"; do
-        if [ $(isBinary "${f}") -eq 1 ]; then
+        # make sure file is binary and executable
+        if [ $(isBinary "${f}") -eq 1 ] && [ -x "${f}" ]; then
             binaries+=("${f}")
         fi
     done
@@ -325,6 +343,7 @@ fi
 
 if [ "${EXG}" = true ]; then
     # get list of all package groups (formatted as "group package")
+    echo "Searching for package groups..."
     ALLGROUPS=($(pacman -Qg))
 
     # split group blacklist by pipe
