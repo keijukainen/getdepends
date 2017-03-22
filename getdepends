@@ -17,6 +17,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+VERS="0.1"
+
+version() {
+    echo -e "\ngetdepends v$VERS\n"
+}
+
 license() {
     echo -e "\ngetdepends Copyright (C) 2017 keijukainen
 This program comes with ABSOLUTELY NO WARRANTY.
@@ -44,7 +50,9 @@ NOTE: It is recommended that you run pkgfile -u before using this script.
                     quotes and depends array to output.
                     Output: depends=('zlib')
   -R                recursively scan all subfolders
+  -V                display version
   -p                show progress bars
+  -q                quiet. suppress output to package list.
   -n                resolve included source files to packages. only
                     necessary when input path is directory.
                     Example: #include \"ss/ss.h\" -> e2fsprogs
@@ -240,6 +248,7 @@ EXR=false
 REC=false
 INC=false
 PRG=false
+QUI=false
 INPATH=""
 BLPATH=""
 BLGR=""
@@ -274,8 +283,15 @@ while getopts ":i:b:fg:r:Rnpl" o; do
         p)
             PRG=true
             ;;
+        q)
+            QUI=true
+            ;;
         l)
             license
+            exit
+            ;;
+        V)
+            version
             exit
             ;;
         *)
@@ -332,7 +348,9 @@ PKGSKIP=false
 if [ "${BL}" = true ]; then
     BLPATH=$(readlink -mn "${BLPATH}")
     if [ ! -e "${BLPATH}" ] || [ $(isText "${BLPATH}") -ne 1 ]; then
-        echo "The specified blacklist path does not exist or is not supported." >&2
+        if [ "${QUI}" = false ]; then
+            echo "The specified blacklist path does not exist or is not supported." >&2
+        fi
         # there's no need to exit here. just disable the
         # blacklist and continue.
         BL=false
@@ -343,7 +361,9 @@ fi
 
 if [ "${EXG}" = true ]; then
     # get list of all package groups (formatted as "group package")
-    echo "Searching for package groups..."
+    if [ "${QUI}" = false ]; then
+        echo "Searching for package groups..."
+    fi
     ALLGROUPS=($(pacman -Qg))
 
     # split group blacklist by pipe
@@ -364,20 +384,28 @@ if [ -f "${INPATH}" ]; then
     if [ $(isBinary "${INPATH}") -eq 1 ]; then
         # input is binary file
         # extract required lib paths
-        echo "Scanning for libraries..."
+        if [ "${QUI}" = false ]; then
+            echo "Scanning for libraries..."
+        fi
         LIBLIST=($(getLibs "${INPATH}"))
 
         # sort, remove duplicates, make sure libs exist
-        echo "Validating libraries..."
+        if [ "${QUI}" = false ]; then
+            echo "Validating libraries..."
+        fi
         TARGETS+=($(validateLibs "${LIBLIST[@]}"))
     else
         # input is source file
         # extract the included file names
-        echo "Scanning for includes..."
+        if [ "${QUI}" = false ]; then
+            echo "Scanning for includes..."
+        fi
         INCLIST=($(getIncludes "${INPATH}"))
 
         # sort, remove duplicates, make sure included files exist
-        echo "Validating includes..."
+        if [ "${QUI}" = false ]; then
+            echo "Validating includes..."
+        fi
         TARGETS+=($(validateIncludes "${INCLIST[@]}"))
     fi
 else
@@ -385,10 +413,14 @@ else
     # make sure user wants to search for includes
     if [ "${INC}" = true ]; then
         # search inpath for all h/c/hpp/cpp files
-        echo "Searching for sources..."
+        if [ "${QUI}" = false ]; then
+            echo "Searching for sources..."
+        fi
         SOURCES=($(getSourceFiles "${REC}" "${INPATH}"))
 
-        echo "Scanning for includes..."
+        if [ "${QUI}" = false ]; then
+            echo "Scanning for includes..."
+        fi
 
         iter=0
         for s in "${SOURCES[@]}"; do
@@ -398,20 +430,28 @@ else
             iter=$(($iter+1))
             if [ "${PRG}" = true ]; then
                 prgrs=($(getProgress "${iter}" "${#SOURCES[@]}"))
-                printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+                if [ "${QUI}" = false ]; then
+                    printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+                fi
             fi
         done
 
         # sort, remove duplicates, make sure included files exist
-        echo -e "\nValidating includes..."
+        if [ "${QUI}" = false ]; then
+            echo -e "\nValidating includes..."
+        fi
         TARGETS+=($(validateIncludes "${INCLIST[@]}"))
     fi
     
     # search for binary files
-    echo "Searching for binaries..."
+    if [ "${QUI}" = false ]; then
+        echo "Searching for binaries..."
+    fi
     BINARIES=($(getBinaryFiles "${REC}" "${INPATH}"))
 
-    echo -e "Scanning for libraries...\n"
+    if [ "${QUI}" = false ]; then
+        echo -e "Scanning for libraries...\n"
+    fi
     
     iter=0
     for b in "${BINARIES[@]}"; do
@@ -421,16 +461,22 @@ else
         iter=$(($iter+1))
         if [ "${PRG}" = true ]; then
             prgrs=($(getProgress "${iter}" "${#BINARIES[@]}"))
-            printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+            if [ "${QUI}" = false ]; then
+                printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+            fi
         fi
     done
 
     # sort, remove duplicates, make sure libs exist
-    echo -e "\nValidating libraries..."
+    if [ "${QUI}" = false ]; then
+        echo -e "\nValidating libraries..."
+    fi
     TARGETS+=($(validateLibs "${LIBLIST[@]}"))
 fi
 
-echo "Scanning packages..."
+if [ "${QUI}" = false ]; then
+    echo "Scanning packages..."
+fi
 
 iter=0
 for t in "${TARGETS[@]}"; do
@@ -442,7 +488,9 @@ for t in "${TARGETS[@]}"; do
     iter=$(($iter+1))
     if [ "${PRG}" = true ]; then
         prgrs=($(getProgress "${iter}" "${#TARGETS[@]}"))
-        printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+        if [ "${QUI}" = false ]; then
+            printf "\r%3d%% %.${prgrs[0]}s" "${prgrs[1]}" "${PMETER}"
+        fi
     fi
 
     # continue if no package found
